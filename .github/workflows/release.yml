@@ -1,0 +1,70 @@
+name: Release
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [main]
+    paths: ['Cargo.toml']
+  workflow_dispatch:
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    name: Build and publish release
+    permissions:
+      contents: write # Required to create GitHub releases and upload release assets.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check if tag exists
+        id: check_tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Rust
+        if: steps.check_tag.outputs.exists == 'false'
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+        with:
+          toolchain: stable
+          cache: false
+
+      - name: Build release binary
+        if: steps.check_tag.outputs.exists == 'false'
+        run: cargo build --release --verbose
+
+      - name: Prepare binary
+        if: steps.check_tag.outputs.exists == 'false'
+        run: |
+          mkdir -p dist
+          cp target/release/hermit dist/hermit-linux-x64
+          chmod +x dist/hermit-linux-x64
+
+      - name: Create Release
+        if: steps.check_tag.outputs.exists == 'false'
+        run: gh release create "$TAG" dist/hermit-linux-x64 --generate-notes --latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}

@@ -1,0 +1,32 @@
+[package]
+name = "hermit"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+regex = "1.10"
+colored = "2.1"
+ignore = "0.4"
+rayon = "1.10"
+
+[profile.dev]
+overflow-checks = true
+lto = "fat"
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+opt-level = 3
+strip = "debuginfo"
+incremental = true
+
+[lints.clippy]
+complexity = "warn"
+correctness = "warn"
+nursery = "warn"
+pedantic = "warn"
+perf = "warn"
+suspicious = "warn"
+# ==== Security-related clippy lints
+arithmetic_side_effects = "warn"
+as_conversions = "warn"

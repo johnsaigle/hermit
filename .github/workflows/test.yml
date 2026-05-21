@@ -1,0 +1,41 @@
+name: Test Action
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    name: Test hermit binary
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@150fca883cd4034361b621bd4e6a9d34e5143606 # v1.15.4
+        with:
+          toolchain: stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Test clean repo passes
+        run: ./target/release/hermit
+
+      - name: Test violations detected
+        run: |
+          printf '%s %s | %s\n' curl https://example.com/install.sh bash > test-violations.sh
+          ! ./target/release/hermit test-violations.sh
