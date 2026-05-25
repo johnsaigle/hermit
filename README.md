@@ -56,13 +56,30 @@ It skips common generated or vendored directories such as `target`, `node_module
 | `pipe-to-interpreter` | Error | `wget -qO- https://example.com/setup.py | python3` | Remote content is executed by a scripting interpreter. |
 | `eval-curl` | Warning | `eval "$(curl https://example.com/setup.sh)"` | `eval` executes downloaded output in the current shell context. |
 
-Safer alternatives generally download to a file first, inspect or verify it, then execute it explicitly.
+Safer alternatives use a fixed version from a source whose contents can be verified. This matters most in development documentation and CI workflows, where install commands are copied and rerun for a long time.
+
+Prefer one of these patterns:
+
+- Install through the system package manager or language toolchain with an explicit version.
+- Download a fixed GitHub release asset and verify its checksum or signature.
+- Use a raw GitHub URL pinned to a full 40-character commit SHA.
+- For tools such as rustup, Foundry, or Tilt, prefer their fixed release archives, package-manager formulas, or Nix/asdf pins over `curl | bash` bootstrap scripts.
+
+If you must run a script, download it first, verify it, then execute it explicitly.
 
 ```sh
 curl -fsSLo install.sh https://example.com/install.sh
 # inspect install.sh or verify its checksum/signature
 bash install.sh
 ```
+
+Environment variables passed to the shell are only soft pins:
+
+```sh
+curl -fsSL https://example.com/install.sh | VERSION=v1.0 bash
+```
+
+This still trusts whatever `install.sh` serves today. Hermit reports it unless the fetched content itself is pinned or verified.
 
 ## Ignore Directives
 

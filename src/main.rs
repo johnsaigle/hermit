@@ -9,18 +9,26 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::LazyLock;
 
-static CURL_PIPE_SHELL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(curl|wget)\b.*\|.*\b(bash|sh|zsh|fish|dash)\b").unwrap()
-});
+static CURL_PIPE_SHELL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(curl|wget)\b.*\|.*\b(bash|sh|zsh|fish|dash)\b").unwrap());
 
 static CURL_PIPE_INTERPRETER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(curl|wget)\b.*\|.*\b(python[23]?|perl|ruby|lua[0-9]*|node)\b").unwrap()
 });
 
-// Matches: eval "$(curl ...)" or eval "`curl ...`" — eval explicitly executes the output
-static CURL_EVAL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\beval\s+.*(\$\(|`).*\b(curl|wget)\b").unwrap()
+static RAW_GITHUB_FULL_COMMIT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"https://raw\.githubusercontent\.com/[^/\s'"]+/[^/\s'"]+/[0-9a-fA-F]{40}/[^\s|'"]+"#,
+    )
+    .unwrap()
 });
+
+static REMOTE_URL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"https?://[^\s|'"]+"#).unwrap());
+
+// Matches: eval "$(curl ...)" or eval "`curl ...`" — eval explicitly executes the output
+static CURL_EVAL_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\beval\s+.*(\$\(|`).*\b(curl|wget)\b").unwrap());
 
 static IGNORE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"hermit:\s*ignore(?:\s*\[([^\]]*)\])?").unwrap());
@@ -100,14 +108,37 @@ fn main() {
             )
             .red()
         );
-        println!(
-            "{}",
-            "Tip: never pipe curl/wget into a shell interpreter. Download, inspect, then execute."
-                .blue()
-        );
+        print_remediation_tip();
         println!();
         process::exit(1);
     }
+}
+
+fn print_remediation_tip() {
+    println!(
+        "{}",
+        "Fix: use a versioned, verifiable install path.".blue()
+    );
+    println!(
+        "{}",
+        "  - Prefer the system package manager or language toolchain with an explicit version."
+            .blue()
+    );
+    println!(
+        "{}",
+        "  - In CI/docs, download a fixed GitHub release asset or commit-pinned raw file, then verify checksum/signature before executing."
+            .blue()
+    );
+    println!(
+        "{}",
+        "  - Examples: rustup-init from a fixed rustup archive, Foundry/Tilt release tarballs, or brew/apt/asdf/nix pins."
+            .blue()
+    );
+    println!(
+        "{}",
+        "  - Env pins like VERSION=v1.0 bash only help if the remote script itself is trusted and immutable."
+            .blue()
+    );
 }
 
 fn lint_files(root: &Path) -> LintResult {
@@ -303,9 +334,7 @@ fn comment_style_for_file(path: &Path) -> Option<CommentStyle> {
         });
     }
 
-    if is_shell_file(path)
-        || is_makefile(path.file_name().and_then(|n| n.to_str()).unwrap_or(""))
-    {
+    if is_shell_file(path) || is_makefile(path.file_name().and_then(|n| n.to_str()).unwrap_or("")) {
         return Some(CommentStyle {
             prefix: "#",
             suffix: "",
@@ -342,29 +371,28 @@ fn is_ignore_directive(line: &str, style: &CommentStyle) -> Option<IgnoreDirecti
         return None;
     }
 
-    let inner = trimmed
-        .strip_prefix(style.prefix)
-        .and_then(|rest| {
-            if style.suffix.is_empty() {
-                Some(rest.trim())
-            } else if let Some(stripped) = rest.strip_suffix(style.suffix) {
-                Some(stripped.trim())
-            } else {
-                None
-            }
-        });
+    let inner = trimmed.strip_prefix(style.prefix).and_then(|rest| {
+        if style.suffix.is_empty() {
+            Some(rest.trim())
+        } else if let Some(stripped) = rest.strip_suffix(style.suffix) {
+            Some(stripped.trim())
+        } else {
+            None
+        }
+    });
 
     inner.and_then(|content| {
         IGNORE_RE.find(content).map(|m| {
             let caps = IGNORE_RE.captures(m.as_str());
-            caps.and_then(|c| c.get(1)).map_or(IgnoreDirective::All, |rule_match| {
-                let rule = rule_match.as_str().trim();
-                if rule.is_empty() {
-                    IgnoreDirective::All
-                } else {
-                    IgnoreDirective::Specific(rule.to_string())
-                }
-            })
+            caps.and_then(|c| c.get(1))
+                .map_or(IgnoreDirective::All, |rule_match| {
+                    let rule = rule_match.as_str().trim();
+                    if rule.is_empty() {
+                        IgnoreDirective::All
+                    } else {
+                        IgnoreDirective::Specific(rule.to_string())
+                    }
+                })
         })
     })
 }
@@ -447,8 +475,12 @@ fn check_file(
         let prev_skip = skip_next.take();
 
         // If either prev or inline directive says skip all, skip this line
-        if prev_skip.as_ref().is_some_and(|d| matches!(d, IgnoreDirective::All))
-            || inline_skip.as_ref().is_some_and(|d| matches!(d, IgnoreDirective::All))
+        if prev_skip
+            .as_ref()
+            .is_some_and(|d| matches!(d, IgnoreDirective::All))
+            || inline_skip
+                .as_ref()
+                .is_some_and(|d| matches!(d, IgnoreDirective::All))
         {
             continue;
         }
@@ -485,7 +517,8 @@ fn is_comment_or_placeholder(line: &str, is_markdown: bool) -> bool {
         || trimmed.starts_with("<!--")
         || trimmed.contains("<url>")
         || trimmed.contains("<URL>")
-        || (is_markdown && (trimmed.starts_with('`') || trimmed.starts_with('>') || trimmed.starts_with('-')))
+        || (is_markdown
+            && (trimmed.starts_with('`') || trimmed.starts_with('>') || trimmed.starts_with('-')))
 }
 
 fn should_lint_markdown_code_block(fence_line: &str) -> bool {
@@ -504,11 +537,12 @@ fn should_lint_markdown_code_block(fence_line: &str) -> bool {
 fn check_pipe_to_shell(line: &str, line_num: usize) -> Vec<Violation> {
     let mut violations = Vec::new();
 
-    if CURL_PIPE_SHELL_RE.is_match(line) {
+    if CURL_PIPE_SHELL_RE.is_match(line) && !is_pinned_raw_github_url(line) {
         violations.push(Violation {
             line_num,
-            message: "curl/wget piped directly to shell — this is RCE. Download, inspect, then execute."
-                .to_string(),
+            message:
+                "curl/wget piped directly to shell; use a pinned and verified installer instead."
+                    .to_string(),
             line_content: line.trim().to_string(),
             rule_id: Some("pipe-to-shell".to_string()),
             severity: Severity::Error,
@@ -518,13 +552,24 @@ fn check_pipe_to_shell(line: &str, line_num: usize) -> Vec<Violation> {
     violations
 }
 
+fn is_pinned_raw_github_url(line: &str) -> bool {
+    let before_pipe = line.split('|').next().unwrap_or(line);
+    let mut urls = REMOTE_URL_RE.find_iter(before_pipe);
+
+    let Some(url) = urls.next() else {
+        return false;
+    };
+
+    urls.next().is_none() && RAW_GITHUB_FULL_COMMIT_RE.is_match(url.as_str())
+}
+
 fn check_pipe_to_interpreter(line: &str, line_num: usize) -> Vec<Violation> {
     let mut violations = Vec::new();
 
     if CURL_PIPE_INTERPRETER_RE.is_match(line) {
         violations.push(Violation {
             line_num,
-            message: "curl/wget piped directly to a scripting interpreter — this is RCE. Download, inspect, then execute."
+            message: "curl/wget piped directly to a scripting interpreter; use a pinned and verified installer instead."
                 .to_string(),
             line_content: line.trim().to_string(),
             rule_id: Some("pipe-to-interpreter".to_string()),
@@ -555,7 +600,11 @@ fn check_eval_curl(line: &str, line_num: usize) -> Vec<Violation> {
 fn print_violations(path: &Path, violations: &[Violation]) {
     let has_errors = violations.iter().any(|v| v.severity == Severity::Error);
     let path_prefix = if has_errors { "✗" } else { "⚠" };
-    let path_color = if has_errors { path_prefix.red() } else { path_prefix.yellow() };
+    let path_color = if has_errors {
+        path_prefix.red()
+    } else {
+        path_prefix.yellow()
+    };
     println!("{} {}", path_color, path.display().to_string().white());
     for violation in violations {
         let prefix = match violation.severity {
@@ -593,15 +642,11 @@ mod tests {
     }
 
     fn plain_context() -> LintContext {
-        LintContext {
-            is_markdown: false,
-        }
+        LintContext { is_markdown: false }
     }
 
     fn markdown_context() -> LintContext {
-        LintContext {
-            is_markdown: true,
-        }
+        LintContext { is_markdown: true }
     }
 
     // ===== curl | bash tests =====
@@ -634,6 +679,49 @@ mod tests {
     #[test]
     fn test_curl_pipe_zsh_violation() {
         let violations = check_pipe_to_shell("curl -L https://example.com | zsh", 1);
+        assert_eq!(violations.len(), 1);
+    }
+
+    #[test]
+    fn test_raw_github_full_commit_pipe_bash_allowed() {
+        let violations = check_pipe_to_shell(
+            "curl -fsSL https://raw.githubusercontent.com/org/repo/0123456789abcdef0123456789abcdef01234567/install.sh | bash",
+            1,
+        );
+        assert_eq!(violations.len(), 0);
+    }
+
+    #[test]
+    fn test_raw_github_short_commit_pipe_bash_violation() {
+        let violations = check_pipe_to_shell(
+            "curl -fsSL https://raw.githubusercontent.com/org/repo/0123456/install.sh | bash",
+            1,
+        );
+        assert_eq!(violations.len(), 1);
+    }
+
+    #[test]
+    fn test_raw_github_tag_pipe_bash_violation() {
+        let violations = check_pipe_to_shell(
+            "curl -fsSL https://raw.githubusercontent.com/org/repo/v1.0.0/install.sh | bash",
+            1,
+        );
+        assert_eq!(violations.len(), 1);
+    }
+
+    #[test]
+    fn test_raw_github_full_commit_with_extra_url_pipe_bash_violation() {
+        let violations = check_pipe_to_shell(
+            "curl -fsSL https://example.com/install.sh https://raw.githubusercontent.com/org/repo/0123456789abcdef0123456789abcdef01234567/install.sh | bash",
+            1,
+        );
+        assert_eq!(violations.len(), 1);
+    }
+
+    #[test]
+    fn test_env_version_pipe_bash_violation() {
+        let violations =
+            check_pipe_to_shell("curl -fsSL https://def.no/haxx.sh | VERSION=v1.0 bash", 1);
         assert_eq!(violations.len(), 1);
     }
 
@@ -674,15 +762,13 @@ mod tests {
 
     #[test]
     fn test_curl_pipe_python3_violation() {
-        let violations =
-            check_pipe_to_interpreter("curl https://example.com | python3 -", 1);
+        let violations = check_pipe_to_interpreter("curl https://example.com | python3 -", 1);
         assert_eq!(violations.len(), 1);
     }
 
     #[test]
     fn test_wget_pipe_perl_violation() {
-        let violations =
-            check_pipe_to_interpreter("wget -O - https://example.com | perl", 1);
+        let violations = check_pipe_to_interpreter("wget -O - https://example.com | perl", 1);
         assert_eq!(violations.len(), 1);
     }
 
@@ -706,17 +792,13 @@ mod tests {
 
     #[test]
     fn test_curl_pipe_grep_allowed() {
-        let violations =
-            check_pipe_to_interpreter("curl https://example.com | grep pattern", 1);
+        let violations = check_pipe_to_interpreter("curl https://example.com | grep pattern", 1);
         assert_eq!(violations.len(), 0);
     }
 
     #[test]
     fn test_pipe_to_non_interpreter_allowed() {
-        let violations = check_pipe_to_interpreter(
-            "curl https://api.example.com | jq '.data'",
-            1,
-        );
+        let violations = check_pipe_to_interpreter("curl https://api.example.com | jq '.data'", 1);
         assert_eq!(violations.len(), 0);
     }
 
@@ -724,10 +806,7 @@ mod tests {
 
     #[test]
     fn test_eval_dollar_paren_curl_violation() {
-        let violations = check_eval_curl(
-            "eval \"$(curl -sSL https://example.com/install.sh)\"",
-            1,
-        );
+        let violations = check_eval_curl("eval \"$(curl -sSL https://example.com/install.sh)\"", 1);
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].rule_id.as_deref(), Some("eval-curl"));
         assert_eq!(violations[0].severity, Severity::Warning);
@@ -735,10 +814,7 @@ mod tests {
 
     #[test]
     fn test_eval_backtick_curl_violation() {
-        let violations = check_eval_curl(
-            "eval \"`curl -sSL https://example.com/install.sh`\"",
-            1,
-        );
+        let violations = check_eval_curl("eval \"`curl -sSL https://example.com/install.sh`\"", 1);
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].rule_id.as_deref(), Some("eval-curl"));
     }
@@ -884,7 +960,8 @@ $ curl -sSL https://example.com | bash
 
     #[test]
     fn test_inline_ignore_only_that_line() {
-        let content = "curl https://example.com | bash  # hermit: ignore\ncurl https://example.com | bash\n";
+        let content =
+            "curl https://example.com | bash  # hermit: ignore\ncurl https://example.com | bash\n";
         let violations = check_file(content, &plain_context(), &shell_comment_style());
         assert_eq!(violations.len(), 1);
     }
@@ -898,8 +975,7 @@ $ curl -sSL https://example.com | bash
 
     #[test]
     fn test_inline_ignore_specific_rule() {
-        let content =
-            "curl https://example.com | bash  # hermit: ignore[pipe-to-shell]\ncurl https://example.com | python\n";
+        let content = "curl https://example.com | bash  # hermit: ignore[pipe-to-shell]\ncurl https://example.com | python\n";
         let violations = check_file(content, &plain_context(), &shell_comment_style());
         // First line's pipe-to-shell ignored, second line's pipe-to-interpreter fires
         assert_eq!(violations.len(), 1);
